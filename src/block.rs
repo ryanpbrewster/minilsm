@@ -1,6 +1,6 @@
 use std::io::{Cursor, Read, Write};
 
-use anyhow::bail;
+use anyhow::{bail, Ok};
 
 use crate::{varint, ByteSlice};
 
@@ -8,14 +8,14 @@ const TARGET_BLOCK_SIZE: u32 = 4096;
 
 pub struct CompressedBlock(Box<[u8]>);
 
-#[derive(Default)]
-pub struct Builder {
+#[derive(Default, PartialEq, Eq, Debug)]
+pub struct Block {
     num_entries: u32,
     data: Vec<u8>,
     offsets: Vec<u8>, // encoded as fixed-width u32s
 }
 
-impl Builder {
+impl Block {
     const TARGET_SIZE: usize = 4096;
     fn append(&mut self, key: &ByteSlice, value: &ByteSlice) -> anyhow::Result<()> {
         let cur_len = self.data.len() as u32;
@@ -37,13 +37,36 @@ impl Builder {
 
         Ok(())
     }
-    fn finish(mut self) -> anyhow::Result<CompressedBlock> {
-        self.offsets.extend(self.num_entries.to_be_bytes());
-
+    fn compress(&self) -> anyhow::Result<CompressedBlock> {
         let mut encoder = zstd::Encoder::new(Vec::new(), 0)?;
-        std::io::copy(&mut Cursor::new(self.data), &mut encoder)?;
-        std::io::copy(&mut Cursor::new(self.offsets), &mut encoder)?;
+        std::io::copy(&mut Cursor::new(&self.data), &mut encoder)?;
+        std::io::copy(&mut Cursor::new(&self.offsets), &mut encoder)?;
+        std::io::copy(
+            &mut Cursor::new(self.num_entries.to_be_bytes()),
+            &mut encoder,
+        )?;
         Ok(CompressedBlock(encoder.finish()?.into_boxed_slice()))
+    }
+
+    pub fn decompress(compressed: CompressedBlock) -> anyhow::Result<Self> {
+        let mut raw = zstd::decode_all(Cursor::new(compressed.0))?;
+        let Some(num_entries_at) = raw.len().checked_sub(4) else {
+            bail!("block is too short")
+        };
+        let num_entries = u32::from_be_bytes(raw.split_off(num_entries_at).as_slice().try_into()?);
+        let Some(offsets_at) = raw.len().checked_sub(4 * num_entries as usize) else {
+            bail!(
+                "block is too short, num_elements={} but len={}",
+                num_entries,
+                raw.len()
+            )
+        };
+        let offsets = raw.split_off(offsets_at);
+        Ok(Block {
+            num_entries,
+            offsets,
+            data: raw,
+        })
     }
 }
 
@@ -51,17 +74,19 @@ impl Builder {
 mod test {
     use crate::ByteSlice;
 
-    use super::Builder;
+    use super::Block;
 
     #[test]
     fn builder_smoke_test() -> anyhow::Result<()> {
-        let mut b = Builder::default();
-        b.append(&ByteSlice::from_str(b"foo")?, &ByteSlice::from_str(b"bar")?)?;
-        b.append(
+        let mut block = Block::default();
+        block.append(&ByteSlice::from_str(b"foo")?, &ByteSlice::from_str(b"bar")?)?;
+        block.append(
             &ByteSlice::from_str(b"hello")?,
             &ByteSlice::from_str(b"world")?,
         )?;
-        b.finish()?;
+        let compressed = block.compress()?;
+        let decompressed = Block::decompress(compressed)?;
+        assert_eq!(block, decompressed);
         Ok(())
     }
 }

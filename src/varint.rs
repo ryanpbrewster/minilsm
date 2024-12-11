@@ -1,4 +1,6 @@
-use std::io::Write;
+use std::io::{BufRead, Read, Write};
+
+use byteorder::ReadBytesExt;
 
 pub fn encoded_length_u32(n: u32) -> u32 {
     if n < (1 << 7) {
@@ -13,7 +15,7 @@ pub fn encoded_length_u32(n: u32) -> u32 {
     if n < (1 << 28) {
         return 4;
     }
-    return 5;
+    5
 }
 pub fn encoded_length_u64(n: u64) -> u32 {
     todo!()
@@ -66,88 +68,47 @@ pub fn encode_u64(n: u64, mut w: impl Write) -> std::io::Result<u32> {
     todo!()
 }
 
-fn encode_to_vec(mut n: u32) -> Vec<u8> {
-    if n <= 250 {
-        return vec![n as u8];
+pub fn decode_u32(mut r: impl ReadBytesExt) -> anyhow::Result<u32> {
+    let first = r.read_u8()?;
+    if first < 0b1000_0000 {
+        return Ok(first as u32);
     }
-
-    let mut v: Vec<u8> = Vec::with_capacity(5);
-    while n > 0 {
-        v.push(n as u8);
-        n >>= 8;
+    if first < 0b1100_0000 {
+        return Ok((first & 0b0011_1111) as u32 | (r.read_u8()? as u32) << 6);
     }
-    v.push(250 + v.len() as u8);
-    v.reverse();
-    v
-}
-
-fn decode_from_vec(v: Vec<u8>) -> Option<u32> {
-    let (&first, rest) = v.split_first()?;
-    let first = first;
-    if first <= 250 {
-        return Some(first as u32);
+    if first < 0b1110_0000 {
+        return Ok((first & 0b0001_1111) as u32
+            | (r.read_u8()? as u32) << 5
+            | (r.read_u8()? as u32) << 13);
     }
-    let mut n: u32 = 0;
-    for i in 0..(first - 250) {
-        n = (n << 8) + *rest.get(i as usize)? as u32;
+    if first < 0b1111_0000 {
+        return Ok((first & 0b0000_1111) as u32
+            | (r.read_u8()? as u32) << 4
+            | (r.read_u8()? as u32) << 12
+            | (r.read_u8()? as u32) << 20);
     }
-    Some(n)
-}
-
-fn prefix_varint_encode_to_vec(buf: &mut [u8; 5], mut n: u32) -> usize {
-    // 7 bits: leading 0, [7] value bits encoded directly
-    if n < (1 << 7) {
-        buf[0] = n as u8;
-        return 1;
-    }
-    // 14 bits: leading 10, [6, 8] value bits encoded directly
-    if n < (1 << 14) {
-        buf[0] = 0b1000_0000 + (n & 0b0011_1111) as u8;
-        n >>= 6;
-        buf[1] = n as u8;
-        return 2;
-    }
-    // 21 bits: leading 110, [5, 8, 8] value bits encoded directly
-    if n < (1 << 21) {
-        buf[0] = 0b1100_0000 + (n & 0b0001_1111) as u8;
-        n >>= 5;
-        buf[1] = n as u8;
-        n >>= 8;
-        buf[2] = n as u8;
-        return 3;
-    }
-    // 28 bits: leading 1110, [4, 8, 8, 8] value bits encoded directly
-    if n < (1 << 28) {
-        buf[0] = 0b1110_0000 + (n & 0b0000_1111) as u8;
-        n >>= 4;
-        buf[1] = n as u8;
-        n >>= 8;
-        buf[2] = n as u8;
-        n >>= 8;
-        buf[3] = n as u8;
-        return 4;
-    }
-    // 32 bits: leading 11110, [3, 8, 8, 8, 8] value bits encoded directly
-    buf[0] = 0b1111_0000 + (n & 0b0000_0111) as u8;
-    n >>= 3;
-    buf[1] = n as u8;
-    n >>= 8;
-    buf[2] = n as u8;
-    n >>= 8;
-    buf[3] = n as u8;
-    n >>= 8;
-    buf[4] = n as u8;
-    return 5;
+    Ok((first & 0b0000_0111) as u32
+        | (r.read_u8()? as u32) << 3
+        | (r.read_u8()? as u32) << 11
+        | (r.read_u8()? as u32) << 19
+        | (r.read_u8()? as u32) << 27)
 }
 
 #[cfg(test)]
 mod test {
-    use super::{decode_from_vec, encode_to_vec, encode_u32, prefix_varint_encode_to_vec};
+    use std::io::Cursor;
+
+    use crate::varint::{decode_u32, encoded_length_u32};
+
+    use super::encode_u32;
 
     fn encode_helper(n: u32) -> Vec<u8> {
         let mut buf = Vec::new();
         encode_u32(n, &mut buf).unwrap();
         buf
+    }
+    fn decode_helper(v: Vec<u8>) -> Option<u32> {
+        decode_u32(Cursor::new(v)).ok()
     }
 
     #[test]
@@ -163,27 +124,26 @@ mod test {
 
     #[test]
     fn decode_golden() {
-        assert_eq!(decode_from_vec(vec![0]), Some(0));
-        assert_eq!(decode_from_vec(vec![250]), Some(250));
-        assert_eq!(decode_from_vec(vec![251, 251]), Some(251));
-        assert_eq!(decode_from_vec(vec![252, 1, 0]), Some(256));
+        assert_eq!(decode_helper(vec![0]), Some(0));
+        assert_eq!(decode_helper(vec![127]), Some(127));
+        assert_eq!(decode_helper(vec![186, 3]), Some(250)); // 0b10111010
+        assert_eq!(decode_helper(vec![191, 3]), Some(255));
+        assert_eq!(decode_helper(vec![192, 0, 2]), Some(16384));
 
         // Some broken decodings
-        assert_eq!(decode_from_vec(vec![251]), None);
-        assert_eq!(decode_from_vec(vec![253, 1, 0]), None);
+        assert_eq!(decode_helper(vec![128]), None);
 
         // Some weird but technically valid encodings
-        assert_eq!(decode_from_vec(vec![251, 0]), Some(0));
-        assert_eq!(decode_from_vec(vec![252, 0, 1]), Some(1));
+        assert_eq!(decode_helper(vec![128, 0]), Some(0));
     }
 
     #[test]
     fn u16_efficiency() {
         assert_eq!(
             (0..=u16::MAX)
-                .map(|v| encode_to_vec(v as u32).len())
+                .map(|n| encoded_length_u32(n as u32) as usize)
                 .sum::<usize>(),
-            196101,
+            180096,
         );
         // Efficiency of just directly using a u16 fixed width encoding
         assert_eq!((0x1_0000) * 2, 131072,);
@@ -191,13 +151,7 @@ mod test {
         let mut buf = [0u8; 5];
         assert_eq!(
             (0..=u16::MAX)
-                .map(|v| vu128::encode_u32(&mut buf, v as u32))
-                .sum::<usize>(),
-            180096,
-        );
-        assert_eq!(
-            (0..=u16::MAX)
-                .map(|v| prefix_varint_encode_to_vec(&mut buf, v as u32))
+                .map(|n| vu128::encode_u32(&mut buf, n as u32))
                 .sum::<usize>(),
             180096,
         );
