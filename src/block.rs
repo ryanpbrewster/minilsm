@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 
 use anyhow::{bail, Ok};
 
@@ -17,7 +17,18 @@ pub struct Block {
 
 impl Block {
     const TARGET_SIZE: usize = 4096;
-    fn append(&mut self, key: &ByteSlice, value: &ByteSlice) -> anyhow::Result<()> {
+    pub fn is_empty(&self) -> bool {
+        self.num_entries > 0
+    }
+    pub fn len(&self) -> u32 {
+        self.num_entries
+    }
+    pub fn clear(&mut self) {
+        self.num_entries = 0;
+        self.data.clear();
+        self.offsets.clear();
+    }
+    pub fn append(&mut self, key: &ByteSlice, value: &ByteSlice) -> anyhow::Result<()> {
         let cur_len = self.data.len() as u32;
         let encoded_len = varint::encoded_length_u32(key.len())
             + varint::encoded_length_u32(value.len())
@@ -37,15 +48,34 @@ impl Block {
 
         Ok(())
     }
-    fn compress(&self) -> anyhow::Result<CompressedBlock> {
-        let mut encoder = zstd::Encoder::new(Vec::new(), 0)?;
+    /// write encodes this block's contents into the provided writer.
+    /// The structure is based on https://skyzh.github.io/mini-lsm/week1-03-block.html
+    /// [KV1, KV2, ...; OFF1, OFF2, ...; NUM_ENTRIES]
+    /// KV is [vlq(key.length), vlq(value.length), key..., value...] where vlq is a variable length quantity
+    /// OFF is a fixed-size u32
+    /// NUM_ENTRIES is a fixed-size u32
+    /// Today this uses zstd, in the future we may want to make that configurable.
+    fn write(&self, w: impl Write) -> anyhow::Result<()> {
+        let mut encoder = zstd::Encoder::new(w, 0)?;
         std::io::copy(&mut Cursor::new(&self.data), &mut encoder)?;
         std::io::copy(&mut Cursor::new(&self.offsets), &mut encoder)?;
         std::io::copy(
             &mut Cursor::new(self.num_entries.to_be_bytes()),
             &mut encoder,
         )?;
-        Ok(CompressedBlock(encoder.finish()?.into_boxed_slice()))
+        encoder.finish()?;
+        Ok(())
+    }
+    /// drain is a write + clear
+    pub fn drain(&mut self, w: impl Write) -> anyhow::Result<()> {
+        self.write(w)?;
+        self.clear();
+        Ok(())
+    }
+    pub fn compress(&self) -> anyhow::Result<CompressedBlock> {
+        let mut buf = Vec::new();
+        self.write(&mut buf)?;
+        Ok(CompressedBlock(buf.into_boxed_slice()))
     }
 
     pub fn decompress(compressed: CompressedBlock) -> anyhow::Result<Self> {

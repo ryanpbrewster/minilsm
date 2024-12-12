@@ -1,4 +1,4 @@
-use std::io::{BufRead, Read, Write};
+use std::io::Write;
 
 use byteorder::ReadBytesExt;
 

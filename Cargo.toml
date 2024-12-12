@@ -6,5 +6,10 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.94"
 byteorder = "1.5.0"
+serde = { version = "1.0.216", features = ["derive"] }
+serde_cbor = "0.11.2"
 vu128 = "1.1.0"
 zstd = "0.13.2"
+
+[dev-dependencies]
+tempfile = "3.14.0"

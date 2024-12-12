@@ -1,5 +1,6 @@
 pub mod block;
 pub mod varint;
+pub mod sst;
 
 /// ByteSlice is a slice of bytes that is known to have a u32 length.
 /// You cannot use this to represent more than 4 GB of data.
