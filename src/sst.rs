@@ -174,4 +174,27 @@ mod test {
         assert_eq!(iter.next()?, None);
         Ok(())
     }
+
+    #[test]
+    fn sst_writer_compression_efficiency() -> anyhow::Result<()> {
+        let mut f = tempfile::tempfile()?;
+
+        let mut w = Writer::new(&mut f);
+        for i in 0..1_000_000 {
+            let k = ByteString::from_vec(format!("key-{i:06}").into_bytes())?;
+            let v = ByteString::from_vec(format!("value-{i:06}").into_bytes())?;
+            w.append(&k, &v)?;
+        }
+        w.finish()?;
+        assert_eq!(f.metadata()?.len(), 4_212_165); // ~4MB for 1M entries, each entry is ~30 bytes, so this is ~7x compression
+
+        let t = Table::open(f)?;
+        let mut iter = t.iter();
+        let mut count = 0;
+        while iter.next()?.is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 1_000_000);
+        Ok(())
+    }
 }

@@ -5,8 +5,6 @@ use byteorder::{BigEndian, ByteOrder};
 
 use crate::{varint, ByteString};
 
-const TARGET_BLOCK_SIZE: u32 = 4096;
-
 pub struct CompressedBlock(pub Box<[u8]>);
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -17,7 +15,7 @@ pub struct Block {
 }
 
 impl Block {
-    const TARGET_SIZE: usize = 4096;
+    const TARGET_SIZE: u32 = 1 << 16;
     pub fn is_empty(&self) -> bool {
         self.num_entries == 0
     }
@@ -35,7 +33,7 @@ impl Block {
             + varint::encoded_length_u32(value.len())
             + key.len()
             + value.len();
-        if cur_len > 0 && cur_len + encoded_len > TARGET_BLOCK_SIZE {
+        if cur_len > 0 && cur_len + encoded_len > Block::TARGET_SIZE {
             bail!("would overflow non-empty block");
         }
 
