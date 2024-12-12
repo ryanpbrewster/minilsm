@@ -1,12 +1,13 @@
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 
 use anyhow::{bail, Ok};
+use byteorder::{BigEndian, ByteOrder};
 
-use crate::{varint, ByteSlice};
+use crate::{varint, ByteString};
 
 const TARGET_BLOCK_SIZE: u32 = 4096;
 
-pub struct CompressedBlock(Box<[u8]>);
+pub struct CompressedBlock(pub Box<[u8]>);
 
 #[derive(Default, PartialEq, Eq, Debug)]
 pub struct Block {
@@ -18,7 +19,7 @@ pub struct Block {
 impl Block {
     const TARGET_SIZE: usize = 4096;
     pub fn is_empty(&self) -> bool {
-        self.num_entries > 0
+        self.num_entries == 0
     }
     pub fn len(&self) -> u32 {
         self.num_entries
@@ -28,7 +29,7 @@ impl Block {
         self.data.clear();
         self.offsets.clear();
     }
-    pub fn append(&mut self, key: &ByteSlice, value: &ByteSlice) -> anyhow::Result<()> {
+    pub fn append(&mut self, key: &ByteString, value: &ByteString) -> anyhow::Result<()> {
         let cur_len = self.data.len() as u32;
         let encoded_len = varint::encoded_length_u32(key.len())
             + varint::encoded_length_u32(value.len())
@@ -98,25 +99,106 @@ impl Block {
             data: raw,
         })
     }
+
+    pub fn iter<'a>(&'a self) -> BlockIter<'a> {
+        BlockIter {
+            underlying: self,
+            i: 0,
+        }
+    }
+    pub fn into_iter(self) -> OwnedBlockIter {
+        OwnedBlockIter {
+            underlying: self,
+            i: 0,
+        }
+    }
+    fn fetch_entry(&self, i: u32) -> anyhow::Result<Option<(ByteString, ByteString)>> {
+        if i >= self.num_entries {
+            return Ok(None);
+        }
+        let off = u32::from_be_bytes(self.offsets[4 * i as usize..][..4].try_into()?);
+        let mut cursor = Cursor::new(&self.data[off as usize..]);
+        let key_len = varint::decode_u32(&mut cursor)?;
+        let value_len = varint::decode_u32(&mut cursor)?;
+        let mut key = vec![0; key_len as usize];
+        cursor.read_exact(&mut key)?;
+        let mut value = vec![0; value_len as usize];
+        cursor.read_exact(&mut value)?;
+        Ok(Some((ByteString::assume(key), ByteString::assume(value))))
+    }
+}
+
+pub struct BlockIter<'a> {
+    underlying: &'a Block,
+    i: u32,
+}
+impl<'a> BlockIter<'a> {
+    pub fn next(&mut self) -> anyhow::Result<Option<(ByteString, ByteString)>> {
+        if self.i >= self.underlying.num_entries {
+            return Ok(None);
+        }
+        let cur = self.i;
+        self.i += 1;
+        self.underlying.fetch_entry(cur)
+    }
+}
+
+pub struct OwnedBlockIter {
+    underlying: Block,
+    i: u32,
+}
+impl OwnedBlockIter {
+    pub fn next(&mut self) -> anyhow::Result<Option<(ByteString, ByteString)>> {
+        if self.i >= self.underlying.num_entries {
+            return Ok(None);
+        }
+        let cur = self.i;
+        self.i += 1;
+        self.underlying.fetch_entry(cur)
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::ByteSlice;
+    use crate::ByteString;
 
     use super::Block;
 
     #[test]
     fn builder_smoke_test() -> anyhow::Result<()> {
         let mut block = Block::default();
-        block.append(&ByteSlice::from_str(b"foo")?, &ByteSlice::from_str(b"bar")?)?;
         block.append(
-            &ByteSlice::from_str(b"hello")?,
-            &ByteSlice::from_str(b"world")?,
+            &ByteString::from_str(b"foo")?,
+            &ByteString::from_str(b"bar")?,
+        )?;
+        block.append(
+            &ByteString::from_str(b"hello")?,
+            &ByteString::from_str(b"world")?,
         )?;
         let compressed = block.compress()?;
         let decompressed = Block::decompress(compressed)?;
         assert_eq!(block, decompressed);
+        Ok(())
+    }
+
+    #[test]
+    fn iter_smoke_test() -> anyhow::Result<()> {
+        let mut block = Block::default();
+
+        let (k1, v1) = (ByteString::from_str(b"foo")?, ByteString::from_str(b"bar")?);
+        let (k2, v2) = (
+            ByteString::from_str(b"hello")?,
+            ByteString::from_str(b"world")?,
+        );
+
+        block.append(&k1, &v1)?;
+        block.append(&k2, &v2)?;
+
+        let mut iter = block.iter();
+        assert_eq!(iter.next()?, Some((k1, v1)));
+        assert_eq!(iter.next()?, Some((k2, v2)));
+        assert_eq!(iter.next()?, None);
+        assert_eq!(iter.next()?, None);
         Ok(())
     }
 }
